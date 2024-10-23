@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+
+# Author: Atharva Anand Joshi (atharvaa@andrew.cmu.edu)
+
 import os
 import json
 # import pandas as pd
@@ -9,6 +13,8 @@ parser.add_argument('--emilia_base_path', type=str, default='/ocean/projects/cis
 parser.add_argument('--start_shard', type=int, default=0)
 parser.add_argument('--end_shard', type=int, default=1001)
 parser.add_argument('--languages', type=str, default='EN')
+
+args = parser.parse_args()
 
 def json_to_csv(emilia_base_path, lang, shard_start, shard_end, output_path):
     # List to hold data from all JSON files

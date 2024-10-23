@@ -9,6 +9,7 @@ import pandas as pd
 import librosa
 import soundfile as sf
 import argparse
+from joblib import Parallel, delayed
 
 # Set random seed for reproducibility
 RANDOM_SEED = 1
@@ -33,7 +34,7 @@ fsd50k_metadata = pd.read_csv(args.fsd_metadata_path)
 
 # Define paths for clean speech and noise datasets
 EMILIA_PATH = args.emilia_base_path
-FSD_PATH = os.path.join(args.fsd_base_path, args.fsd_split)
+FSD_PATH = args.fsd_base_path
 
 # Output directories
 output_dir = os.path.join(args.output_path, args.name_of_dataset)
@@ -51,11 +52,11 @@ snr_range = (-5, 20)  # SNR levels in dB
 
 
 # Function to calculate scaling factor for the noise based on the desired SNR
-def calculate_noise_scaling(clean_speech, noise, snr_db):
+def calculate_noise_scaling(clean_speech, noise, snr_db, eps=1e-8):
     clean_rms = np.sqrt(np.mean(clean_speech**2))
     noise_rms = np.sqrt(np.mean(noise**2))
     snr_linear = 10**(snr_db / 20)  # Convert SNR from dB to linear
-    scaling_factor = clean_rms / (snr_linear * noise_rms)
+    scaling_factor = clean_rms / (snr_linear * noise_rms + eps)
     return scaling_factor
 
 # Function to mix speech and noise at a given SNR
@@ -66,8 +67,73 @@ def mix_speech_noise(clean_speech, noise, snr_db):
     noisy_speech = clean_speech + scaled_noise
     return noisy_speech, scaling_factor
 
-# Function to generate noisy speech with random SNR
-def generate_noisy_speech(emilia_metadata, fsd50k_metadata, snr_range, output_dir):
+# # Function to generate noisy speech with random SNR
+# def generate_noisy_speech(emilia_metadata, fsd50k_metadata, snr_range):
+#     noise_file_idx = 0  # Start at the first noise file
+    
+#     # Initialize an empty list to hold metadata for noisy speech
+#     noisy_speech_metadata = []
+    
+#     for idx, row in emilia_metadata.iterrows():
+#         # Load clean speech
+#         clean_speech_file = os.path.join(EMILIA_PATH, row['wav'])
+#         clean_speech, sr = librosa.load(clean_speech_file, sr=args.sr)
+
+#         # Ensure all noise files are used evenly
+#         if noise_file_idx >= len(fsd50k_metadata):
+#             fsd50k_metadata = fsd50k_metadata.sample(frac=1, random_state=RANDOM_SEED).reset_index(drop=True)  # Reshuffle when all files are used
+#             noise_file_idx = 0
+
+#         # Select the next noise file from FSD50K metadata
+#         noise_row = fsd50k_metadata.iloc[noise_file_idx]
+#         noise_file_idx += 1
+
+#         # Load noise based on the metadata filename
+#         noise_file = os.path.join(FSD_PATH, args.fsd_split, str(noise_row['fname'])+'.wav')
+#         noise, _ = librosa.load(noise_file, sr=args.sr)
+
+#         # Trim or pad noise to match clean speech duration
+#         if len(noise) < len(clean_speech):
+#             noise = np.tile(noise, int(np.ceil(len(clean_speech) / len(noise))))[:len(clean_speech)]
+#         else:
+#             noise = noise[:len(clean_speech)]
+
+#         # Randomly select an SNR level from the range (seeded)
+#         snr_db = random.uniform(*snr_range)
+
+#         # Mix clean speech and noise, and get the scaling factor
+#         noisy_speech, scaling_factor = mix_speech_noise(clean_speech, noise, snr_db)
+
+#         # Define output file paths
+#         noisy_output_file = os.path.join(wav_dir, f'{row.id}_{noise_row.fname}_SNR{snr_db:.2f}.wav')
+#         clean_output_file = os.path.join(s1_dir, f'{row.id}_{noise_row.fname}_SNR{snr_db:.2f}.wav')
+#         noise_output_file = os.path.join(noise_dir, f'{row.id}_{noise_row.fname}_SNR{snr_db:.2f}.wav')
+
+#         # Save the noisy speech
+#         sf.write(noisy_output_file, noisy_speech, sr)
+
+#         # Save the clean speech file to the s1 folder (if it doesn't already exist)
+#         if not os.path.exists(clean_output_file):
+#             sf.write(clean_output_file, clean_speech, sr)
+
+#         # Save the noise file to the noise folder (if it doesn't already exist)
+#         if not os.path.exists(noise_output_file):
+#             sf.write(noise_output_file, noise, sr)
+
+#         # Append the metadata for this noisy speech
+#         noisy_speech_metadata.append({
+#             'speaker': row['speaker'],
+#             'clean_speech_path': row["wav"],
+#             'noise_category': noise_row['labels'],
+#             'noise_file_path': os.path.join(args.fsd_split, str(noise_row["fname"]) + ".wav"),
+#             'noisy_audio_path': noisy_output_file,
+#             'snr': snr_db
+#         })
+#         print(noisy_output_file)
+    
+#     return noisy_speech_metadata
+
+def generate_noisy_speech_metadata(emilia_metadata, fsd50k_metadata, snr_range):
     noise_file_idx = 0  # Start at the first noise file
     
     # Initialize an empty list to hold metadata for noisy speech
@@ -76,11 +142,10 @@ def generate_noisy_speech(emilia_metadata, fsd50k_metadata, snr_range, output_di
     for idx, row in emilia_metadata.iterrows():
         # Load clean speech
         clean_speech_file = os.path.join(EMILIA_PATH, row['wav'])
-        clean_speech, sr = librosa.load(clean_speech_file, sr=args.sr)
 
         # Ensure all noise files are used evenly
         if noise_file_idx >= len(fsd50k_metadata):
-            random.shuffle(fsd50k_metadata)  # Reshuffle when all files are used
+            fsd50k_metadata = fsd50k_metadata.sample(frac=1, random_state=RANDOM_SEED).reset_index(drop=True)  # Reshuffle when all files are used
             noise_file_idx = 0
 
         # Select the next noise file from FSD50K metadata
@@ -88,59 +153,78 @@ def generate_noisy_speech(emilia_metadata, fsd50k_metadata, snr_range, output_di
         noise_file_idx += 1
 
         # Load noise based on the metadata filename
-        noise_file = os.path.join(FSD_PATH, str(noise_row['fname'])+'.wav')
-        noise, _ = librosa.load(noise_file, sr=args.sr)
-
-        # Trim or pad noise to match clean speech duration
-        if len(noise) < len(clean_speech):
-            noise = np.tile(noise, int(np.ceil(len(clean_speech) / len(noise))))[:len(clean_speech)]
-        else:
-            noise = noise[:len(clean_speech)]
+        noise_file = os.path.join(FSD_PATH, args.fsd_split, str(noise_row['fname'])+'.wav')
 
         # Randomly select an SNR level from the range (seeded)
         snr_db = random.uniform(*snr_range)
-
-        # Mix clean speech and noise, and get the scaling factor
-        noisy_speech, scaling_factor = mix_speech_noise(clean_speech, noise, snr_db)
-
-        # Define output file paths
-        noisy_output_file = os.path.join(wav_dir, f'{row.id}_{noise_row.fname}_SNR{snr_db:.2f}.wav')
-        clean_output_file = os.path.join(s1_dir, f'{row.id}_{noise_row.fname}_SNR{snr_db:.2f}.wav')
-        noise_output_file = os.path.join(noise_dir, f'{row.id}_{noise_row.fname}_SNR{snr_db:.2f}.wav')
-
-        # Save the noisy speech
-        sf.write(noisy_output_file, noisy_speech, sr)
-
-        # Save the clean speech file to the s1 folder (if it doesn't already exist)
-        if not os.path.exists(clean_output_file):
-            sf.write(clean_output_file, clean_speech, sr)
-
-        # Save the noise file to the noise folder (if it doesn't already exist)
-        if not os.path.exists(noise_output_file):
-            sf.write(noise_output_file, noise, sr)
 
         # Append the metadata for this noisy speech
         noisy_speech_metadata.append({
             'speaker': row['speaker'],
             'clean_speech_path': row["wav"],
             'noise_category': noise_row['labels'],
-            'noise_file_path': os.path.join(args.fsd_split, str(noise_row["fname"]) + ".wav"),
-            'noisy_audio_path': noisy_output_file,
-            'scaling_factor': scaling_factor
+            'noise_file_path': os.path.join(str(noise_row["fname"]) + ".wav"),
+            'output_name': f'{row.id}_{noise_row.fname}_SNR{snr_db:.2f}.wav',
+            'snr': snr_db
         })
-        print(noisy_output_file)
     
     return noisy_speech_metadata
+
+def generate_noisy_speech_from_metadata(noisy_speech_metadata_row):
+    clean_speech_file = os.path.join(EMILIA_PATH, noisy_speech_metadata_row['clean_speech_path'])
+    noise_file = os.path.join(FSD_PATH, args.fsd_split, noisy_speech_metadata_row['noise_file_path'])
+    output_name = noisy_speech_metadata_row['output_name']
+    snr_db = noisy_speech_metadata_row['snr']
+    
+    clean_speech, sr = librosa.load(clean_speech_file, sr=args.sr)
+    noise, _ = librosa.load(noise_file, sr=args.sr)
+
+    # Trim or pad noise to match clean speech duration
+    if len(noise) < len(clean_speech):
+        noise = np.tile(noise, int(np.ceil(len(clean_speech) / len(noise))))[:len(clean_speech)]
+    else:
+        noise = noise[:len(clean_speech)]
+    
+    noisy_speech, scaling_factor = mix_speech_noise(clean_speech, noise, snr_db)
+    
+    # Define output file paths
+    noisy_output_file = os.path.join(wav_dir, output_name)
+    clean_output_file = os.path.join(s1_dir, output_name)
+    noise_output_file = os.path.join(noise_dir, output_name)
+
+    # Save the noisy speech
+    sf.write(noisy_output_file, noisy_speech, sr)
+
+    # Save the clean speech file to the s1 folder (if it doesn't already exist)
+    if not os.path.exists(clean_output_file):
+        sf.write(clean_output_file, clean_speech, sr)
+
+    # Save the noise file to the noise folder (if it doesn't already exist)
+    if not os.path.exists(noise_output_file):
+        sf.write(noise_output_file, noise, sr)
+        
+    print(noisy_output_file)
+
+
 
 
 # Shuffle FSD50K metadata at the beginning (seeded) to ensure random noise selection
 fsd50k_metadata = fsd50k_metadata.sample(frac=1, random_state=RANDOM_SEED).reset_index(drop=True)
 
-# Generate noisy speech with random SNR levels
-generate_noisy_speech(emilia_metadata, fsd50k_metadata, snr_range, output_dir)
+# # Generate noisy speech with random SNR levels
+# generate_noisy_speech(emilia_metadata, fsd50k_metadata, snr_range, output_dir)
 
+noisy_speech_metadata = generate_noisy_speech_metadata(emilia_metadata, fsd50k_metadata, snr_range)
 # Convert noisy speech metadata to DataFrame and save it to a CSV file
 noisy_speech_metadata_df = pd.DataFrame(noisy_speech_metadata)
 noisy_speech_metadata_df.to_csv(os.path.join(output_dir, 'noisy_speech_metadata.csv'), index=False)
 
-print('Noisy speech files and metadata generated successfully.')
+print('Noisy speech metadata generated successfully.')
+
+# noisy_speech_metadata_df = pd.read_csv(os.path.join(output_dir, 'noisy_speech_metadata.csv'))
+# noisy_speech_metadata = noisy_speech_metadata_df.to_dict(orient='records')
+
+
+Parallel(n_jobs=-1)(delayed(generate_noisy_speech_from_metadata)(x) for x in noisy_speech_metadata)
+
+print('Noisy speech files generated successfully.')
